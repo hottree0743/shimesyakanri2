@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>大島紬 締め管理 v7.2 (OCR対応版)</title>
+    <title>大島紬 締め管理 v7</title>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -42,11 +42,6 @@
             const [records, setRecords] = useState([]);
             const [editingId, setEditingId] = useState(null);
 
-            // Gemini API用のステート
-            const [apiKey, setApiKey] = useState(() => localStorage.getItem('gemini-api-key') || '');
-            const [isProcessing, setIsProcessing] = useState(false);
-            const [showKeyInput, setShowKeyInput] = useState(false);
-
             const initialForm = {
                 gara_ban: '', gara_name: '', 
                 gara_main_type: '白', gara_keito_type: '一元', gara_kousei_type: '総絣',
@@ -59,17 +54,8 @@
             const [formData, setFormData] = useState(initialForm);
 
             useEffect(() => {
-                try {
-                    const saved = localStorage.getItem('oshimatsumugi-v7');
-                    if (saved) {
-                        const parsed = JSON.parse(saved);
-                        if (Array.isArray(parsed)) {
-                            setRecords(parsed);
-                        }
-                    }
-                } catch (e) {
-                    console.error("LocalStorageデータの読み込みに失敗したぞ。リセットするってばよ。", e);
-                }
+                const saved = localStorage.getItem('oshimatsumugi-v7');
+                if (saved) setRecords(JSON.parse(saved));
             }, []);
 
             useEffect(() => {
@@ -78,49 +64,230 @@
 
             // 予定日計算
             const getScheduledDate = (shimeName, itobetsu, startDate) => {
-                const past = records.filter(r => r && r.shime_name === shimeName && r.itobetsu === itobetsu && r.completion_date);
+                const past = records.filter(r => r.shime_name === shimeName && r.itobetsu === itobetsu && r.completion_date);
                 let avgDays = 30;
                 if (past.length > 0) {
-                    let totalDays = 0;
-                    let validCount = 0;
-                    past.forEach(r => {
-                        const s = new Date(r.itowatashi_date);
-                        const e = new Date(r.completion_date);
-                        if (!isNaN(s.getTime()) && !isNaN(e.getTime())) {
-                            totalDays += Math.round((e.getTime() - s.getTime()) / 86400000);
-                            validCount++;
-                        }
-                    });
-                    if (validCount > 0) {
-                        avgDays = Math.max(1, Math.round(totalDays / validCount));
-                    }
+                    const totalDays = past.reduce((sum, r) => {
+                        const s = new Date(r.itowatashi_date), e = new Date(r.completion_date);
+                        return sum + Math.round((e - s) / 86400000);
+                    }, 0);
+                    avgDays = Math.max(1, Math.round(totalDays / past.length));
                 }
                 return addWorkDays(startDate, avgDays);
             };
 
-            // 画像解析・自動入力のメイン処理
-            const handleImageChange = async (e) => {
-                const file = e.target.files[0];
-                if (!file) return;
-                if (!apiKey) {
-                    alert("先にGemini APIキーを設定してくれってばよ！");
-                    return;
+            const handleSave = () => {
+                if (!formData.gara_name) return alert("柄名を入力してください");
+                
+                // 難易度判定
+                let diffLabel = '中';
+                if (formData.nuki_rank === '高') diffLabel = '高';
+                else if (formData.nuki_rank === '低') diffLabel = '低';
+                else {
+                    const total = 3 + Number(formData.hosu_score) + Number(formData.maisu_score);
+                    if (total >= 11) diffLabel = '高';
+                    else if (total <= 6) diffLabel = '低';
                 }
+                const diffColor = diffLabel === '高' ? 'bg-red-500' : (diffLabel === '低' ? 'bg-green-500' : 'bg-yellow-500');
 
-                setIsProcessing(true);
-                try {
-                    const base64Data = await new Promise((resolve, reject) => {
-                        const reader = new FileReader();
-                        reader.onloadend = () => resolve(reader.result.split(',')[1]);
-                        reader.onerror = reject;
-                        reader.readAsDataURL(file);
-                    });
+                const newRecord = {
+                    ...formData,
+                    id: editingId || Date.now(),
+                    difficulty: diffLabel,
+                    difficultyColor: diffColor,
+                    scheduled_date: getScheduledDate(formData.shime_name, formData.itobetsu, formData.itowatashi_date),
+                    full_gara_type: `${formData.gara_main_type}/${formData.gara_keito_type}/${formData.gara_kousei_type}`
+                };
 
-                    // Gemini 1.5 Flash APIの呼び出し
-                    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            contents: [{
-                                parts: [
-                                    { text: "この画像は大島紬の製造管理用の指示書、またはメモだ。写っている文字を解析し、以下の項目を特定して指定のJSONフォーマットのみで返却せよ。該当情報が見つからない項目は空文字にせよ。解説やマークダウン（
+                setRecords(editingId ? records.map(r => r.id === editingId ? newRecord : r) : [newRecord, ...records]);
+                setFormData(initialForm);
+                setEditingId(null);
+                setTab('進行');
+            };
+
+            return (
+                <div className="max-w-md mx-auto min-h-screen bg-white shadow-2xl flex flex-col pb-10">
+                    <header className="bg-slate-900 text-white p-4 text-center font-bold text-xs tracking-tighter">
+                        大島紬 締め管理システム v7
+                    </header>
+
+                    <nav className="flex bg-slate-100 border-b sticky top-0 z-20 shadow-sm">
+                        {['進行', '管理', '履歴', '工賃計算', '分析'].map(t => (
+                            <button key={t} onClick={() => setTab(t)}
+                                className={`flex-1 py-4 text-[9px] font-bold ${tab === t ? 'bg-white text-indigo-600 border-b-2 border-indigo-600' : 'text-gray-400'}`}>
+                                {t}
+                            </button>
+                        ))}
+                    </nav>
+
+                    <main className="flex-1 p-4 overflow-y-auto">
+                        {/* 進行タブ */}
+                        {tab === '進行' && (
+                            <div className="space-y-4">
+                                {records.filter(r => !r.completion_date).map(r => (
+                                    <div key={r.id} className="bg-white border rounded-xl p-4 shadow-sm border-l-4 border-slate-900">
+                                        <div className="flex justify-between items-start mb-2">
+                                            <span className="font-bold text-slate-800">{r.shime_name} <span className="text-[10px] font-normal text-gray-400">柄番:{r.gara_ban}</span></span>
+                                            <span className={`${r.difficultyColor} text-white text-[9px] px-2 py-0.5 rounded-full font-bold`}>難易度:{r.difficulty}</span>
+                                        </div>
+                                        <div className="text-xs space-y-1 text-slate-600">
+                                            <p><span className="text-gray-400">柄名:</span> {r.gara_name} ({r.itobetsu})</p>
+                                            <p><span className="text-gray-400">渡し日:</span> {r.itowatashi_date}</p>
+                                            <div className="mt-2 p-2 bg-indigo-50 text-indigo-700 font-bold rounded flex justify-between">
+                                                <span>完了予定: {r.scheduled_date}</span>
+                                                <span className="text-[8px] font-normal underline">日曜除外計算済</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {/* 管理タブ (全項目復活版) */}
+                        {tab === '管理' && (
+                            <div className="animate-in fade-in duration-300">
+                                <label className="input-label text-indigo-600">締め者（必須選択）</label>
+                                <select className="form-input border-indigo-200" value={formData.shime_name} onChange={e=>setFormData({...formData, shime_name: e.target.value})}>
+                                    {SHIME_MEMBERS.map(m => <option key={m}>{m}</option>)}
+                                </select>
+
+                                <div className="grid grid-cols-2 gap-2">
+                                    <div><label className="input-label">柄番</label><input className="form-input" value={formData.gara_ban} onChange={e=>setFormData({...formData, gara_ban: e.target.value})} /></div>
+                                    <div><label className="input-label">柄名</label><input className="form-input" value={formData.gara_name} onChange={e=>setFormData({...formData, gara_name: e.target.value})} /></div>
+                                </div>
+
+                                <label className="input-label">柄の種類 (⚪︎大島/経糸構成/柄構成)</label>
+                                <div className="grid grid-cols-3 gap-1">
+                                    <select className="form-input text-[10px]" value={formData.gara_main_type} onChange={e=>setFormData({...formData, gara_main_type: e.target.value})}>
+                                        {['白','ベージュ','丸式','風雅','脱色','泥','白泥'].map(v=><option key={v}>{v}</option>)}
+                                    </select>
+                                    <select className="form-input text-[10px]" value={formData.gara_keito_type} onChange={e=>setFormData({...formData, gara_keito_type: e.target.value})}>
+                                        {['一元','地紋'].map(v=><option key={v}>{v}</option>)}
+                                    </select>
+                                    <select className="form-input text-[10px]" value={formData.gara_kousei_type} onChange={e=>setFormData({...formData, gara_kousei_type: e.target.value})}>
+                                        {['総絣','タフコ','ユタフコ'].map(v=><option key={v}>{v}</option>)}
+                                    </select>
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div><label className="input-label">糸別</label><select className="form-input" value={formData.itobetsu} onChange={e=>setFormData({...formData, itobetsu: e.target.value})}>
+                                        {ITOBETSUS.map(i => <option key={i}>{i}</option>)}
+                                    </select></div>
+                                    <div><label className="input-label">ガス糸のマルキ数</label><input type="number" className="form-input" value={formData.maruki} onChange={e=>setFormData({...formData, maruki: e.target.value})} /></div>
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div><label className="input-label">品数</label><input type="number" className="form-input" value={formData.shinasu} onChange={e=>setFormData({...formData, shinasu: e.target.value})} /></div>
+                                    <div><label className="input-label">サガリ</label><input type="number" className="form-input" value={formData.sagari} onChange={e=>setFormData({...formData, sagari: e.target.value})} /></div>
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-4 border-t mt-4 pt-2">
+                                    <div><label className="input-label text-blue-600 font-bold">糸渡し日</label><input type="date" className="form-input text-xs" value={formData.itowatashi_date} onChange={e=>setFormData({...formData, itowatashi_date: e.target.value})} /></div>
+                                    {editingId && (
+                                        <div><label className="input-label text-red-600 font-bold">締め上がり日</label><input type="date" className="form-input text-xs border-red-200" value={formData.completion_date} onChange={e=>setFormData({...formData, completion_date: e.target.value})} /></div>
+                                    )}
+                                </div>
+
+                                <div className="bg-slate-50 p-4 rounded-lg mt-4 border border-slate-200">
+                                    <label className="input-label mt-0">柄抜きの多さ (難易度優先)</label>
+                                    <select className="form-input mb-3" value={formData.nuki_rank} onChange={e=>setFormData({...formData, nuki_rank: e.target.value})}>
+                                        <option value="低">低 (難易度:低に固定)</option>
+                                        <option value="中">中 (他スコアで判定)</option>
+                                        <option value="高">高 (難易度:高に固定)</option>
+                                    </select>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div><label className="text-[10px] text-gray-400">ホス数(1-5)</label><input type="number" className="form-input" value={formData.hosu_score} onChange={e=>setFormData({...formData, hosu_score: e.target.value})} /></div>
+                                        <div><label className="text-[10px] text-gray-400">枚数(1-5)</label><input type="number" className="form-input" value={formData.maisu_score} onChange={e=>setFormData({...formData, maisu_score: e.target.value})} /></div>
+                                    </div>
+                                </div>
+
+                                <label className="input-label">締め工賃 (¥)</label>
+                                <input type="number" className="form-input" value={formData.wage} onChange={e=>setFormData({...formData, wage: e.target.value})} />
+
+                                <label className="input-label">備考</label>
+                                <textarea className="form-input" rows="2" value={formData.note} onChange={e=>setFormData({...formData, note: e.target.value})}></textarea>
+
+                                <button onClick={handleSave} className="w-full bg-slate-900 text-white py-4 rounded-xl font-bold mt-6 shadow-xl active:scale-95 transition-all">
+                                    {editingId ? "履歴の内容を更新する" : "新規データを保存する"}
+                                </button>
+                                {editingId && <button onClick={()=>{setEditingId(null); setFormData(initialForm);}} className="w-full text-xs text-gray-400 mt-2 underline">キャンセルして新規に戻る</button>}
+                            </div>
+                        )}
+
+                        {/* 履歴タブ */}
+                        {tab === '履歴' && (
+                            <div className="space-y-2">
+                                {records.map(r => (
+                                    <div key={r.id} className="bg-white border rounded p-3 text-[10px] flex justify-between items-center shadow-sm">
+                                        <div className="flex-1">
+                                            <p className="font-bold text-slate-800 text-xs">{r.shime_name} / {r.gara_name}</p>
+                                            <p className="text-gray-400">柄番:{r.gara_ban} | {r.itobetsu} | ¥{Number(r.wage).toLocaleString()}</p>
+                                            <p className={r.completion_date ? "text-green-600" : "text-orange-400"}>{r.completion_date ? `完了: ${r.completion_date}` : "【進行中】"}</p>
+                                        </div>
+                                        <button onClick={()=>{setFormData(r); setEditingId(r.id); setTab('管理');}} className="bg-indigo-50 text-indigo-600 px-3 py-2 rounded font-bold ml-2">編集</button>
+                                        <button onClick={()=>{if(confirm("データを完全に削除しますか？")) setRecords(records.filter(x=>x.id!==r.id))}} className="text-red-300 ml-2">削除</button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {/* 工賃計算タブ */}
+                        {tab === '工賃計算' && (
+                            <div className="space-y-4">
+                                {ITOBETSUS.map(ito => (
+                                    <div key={ito} className="bg-white border rounded-xl overflow-hidden shadow-sm">
+                                        <div className="bg-slate-800 text-white p-2 text-[10px] font-bold text-center">{ito} の平均工賃</div>
+                                        <div className="p-3 space-y-2">
+                                            {DIFF_LEVELS.map(lv => {
+                                                const match = records.filter(r => r.itobetsu === ito && r.difficulty === lv && r.wage > 0);
+                                                const avg = match.length ? Math.round(match.reduce((s,r)=>s+Number(r.wage),0)/match.length) : 0;
+                                                return (
+                                                    <div key={lv} className="flex justify-between items-center text-xs border-b pb-1 last:border-0">
+                                                        <span className="text-gray-400">難易度 {lv}</span>
+                                                        <span className="font-bold text-slate-700">¥{avg.toLocaleString()}</span>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {/* 分析タブ */}
+                        {tab === '分析' && (
+                            <div className="space-y-4">
+                                {SHIME_MEMBERS.map(member => (
+                                    <div key={member} className="bg-white border rounded-xl p-4 shadow-sm border-t-4 border-slate-700">
+                                        <h3 className="font-bold text-slate-800 border-b pb-2 mb-3 text-sm">{member} さんの稼働実績</h3>
+                                        <div className="grid grid-cols-2 gap-4">
+                                            <div>
+                                                <h4 className="text-[8px] font-bold text-slate-400 uppercase">平均完成日数</h4>
+                                                {ITOBETSUS.map(ito => {
+                                                    const match = records.filter(r => r.shime_name === member && r.itobetsu === ito && r.completion_date);
+                                                    const avg = match.length ? Math.round(match.reduce((s,r)=>(s+(new Date(r.completion_date)-new Date(r.itowatashi_date))),0)/match.length/86400000) : "--";
+                                                    return <p key={ito} className="text-[10px] mt-1">{ito}: <span className="font-bold">{avg}日</span></p>;
+                                                })}
+                                            </div>
+                                            <div>
+                                                <h4 className="text-[8px] font-bold text-slate-400 uppercase">2026年 製造数</h4>
+                                                {ITOBETSUS.map(ito => {
+                                                    const count = records.filter(r => r.shime_name === member && r.itobetsu === ito && r.completion_date && new Date(r.completion_date).getFullYear() === 2026).length;
+                                                    return <p key={ito} className="text-[10px] mt-1">{ito}: <span className="font-bold">{count} 柄</span></p>;
+                                                })}
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </main>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
