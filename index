@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>大島紬 締め管理 v7.1 (OCR対応)</title>
+    <title>大島紬 締め管理 v7.2 (OCR対応版)</title>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -25,6 +25,7 @@
         const ITOBETSUS = ["絣緯", "地緯", "絣経"];
         const DIFF_LEVELS = ["低", "中", "高"];
 
+        // 日曜除外の計算
         const addWorkDays = (startDateStr, daysToAdd) => {
             let date = new Date(startDateStr);
             if (isNaN(date.getTime())) return "エラー";
@@ -42,7 +43,7 @@
             const [editingId, setEditingId] = useState(null);
 
             // Gemini API用のステート
-            const [apiKey, setApiKey] = useState(localStorage.getItem('gemini-api-key') || '');
+            const [apiKey, setApiKey] = useState(() => localStorage.getItem('gemini-api-key') || '');
             const [isProcessing, setIsProcessing] = useState(false);
             const [showKeyInput, setShowKeyInput] = useState(false);
 
@@ -58,23 +59,41 @@
             const [formData, setFormData] = useState(initialForm);
 
             useEffect(() => {
-                const saved = localStorage.getItem('oshimatsumugi-v7');
-                if (saved) setRecords(JSON.parse(saved));
+                try {
+                    const saved = localStorage.getItem('oshimatsumugi-v7');
+                    if (saved) {
+                        const parsed = JSON.parse(saved);
+                        if (Array.isArray(parsed)) {
+                            setRecords(parsed);
+                        }
+                    }
+                } catch (e) {
+                    console.error("LocalStorageデータの読み込みに失敗したぞ。リセットするってばよ。", e);
+                }
             }, []);
 
             useEffect(() => {
                 localStorage.setItem('oshimatsumugi-v7', JSON.stringify(records));
             }, [records]);
 
+            // 予定日計算
             const getScheduledDate = (shimeName, itobetsu, startDate) => {
-                const past = records.filter(r => r.shime_name === shimeName && r.itobetsu === itobetsu && r.completion_date);
+                const past = records.filter(r => r && r.shime_name === shimeName && r.itobetsu === itobetsu && r.completion_date);
                 let avgDays = 30;
                 if (past.length > 0) {
-                    const totalDays = past.reduce((sum, r) => {
-                        const s = new Date(r.itowatashi_date), e = new Date(r.completion_date);
-                        return sum + Math.round((e - s) / 86400000);
-                    }, 0);
-                    avgDays = Math.max(1, Math.round(totalDays / past.length));
+                    let totalDays = 0;
+                    let validCount = 0;
+                    past.forEach(r => {
+                        const s = new Date(r.itowatashi_date);
+                        const e = new Date(r.completion_date);
+                        if (!isNaN(s.getTime()) && !isNaN(e.getTime())) {
+                            totalDays += Math.round((e.getTime() - s.getTime()) / 86400000);
+                            validCount++;
+                        }
+                    });
+                    if (validCount > 0) {
+                        avgDays = Math.max(1, Math.round(totalDays / validCount));
+                    }
                 }
                 return addWorkDays(startDate, avgDays);
             };
@@ -90,10 +109,10 @@
 
                 setIsProcessing(true);
                 try {
-                    // 画像をBase64に変換
-                    const base64Data = await new Promise((resolve) => {
+                    const base64Data = await new Promise((resolve, reject) => {
                         const reader = new FileReader();
                         reader.onloadend = () => resolve(reader.result.split(',')[1]);
+                        reader.onerror = reject;
                         reader.readAsDataURL(file);
                     });
 
@@ -105,15 +124,3 @@
                             contents: [{
                                 parts: [
                                     { text: "この画像は大島紬の製造管理用の指示書、またはメモだ。写っている文字を解析し、以下の項目を特定して指定のJSONフォーマットのみで返却せよ。該当情報が見つからない項目は空文字にせよ。解説やマークダウン（
-http://googleusercontent.com/immersive_entry_chip/0
-
----
-
-## 使い方
-
-1. **APIキーの取得**
-   Google AI Studio（無料）にアクセスし、Googleアカウントでログインして「Get API key」からキーを発行する。
-2. **アプリでの設定**
-   アプリを起動し、「管理」タブを開く。上部にある「APIキー設定」リンクを叩いて、発行したキー（`AIzaSy...` から始まる文字列）を貼り付ける。一度入力すればスマホのブラウザに記憶される。
-3. **撮影・自動入力**
-   「画像を読み込む」を叩くと、スマホのカメラが起動するかファイル選択が開く。伝票やメモの写真を撮れば、AIが自動解析して**柄番・柄名・マルキ数・品数・サガリ**をフォームへ一瞬で流し込むぞ！
